@@ -24,7 +24,8 @@ on:
 jobs:
   review:
     uses: k-devcon/muse-review/.github/workflows/review.yml@v1
-    secrets: inherit
+    secrets:
+      META_API_KEY: ${{ secrets.META_API_KEY }}
     permissions:
       contents: read
       pull-requests: write
@@ -32,7 +33,10 @@ jobs:
 ```
 
 그리고 레포에 `META_API_KEY` 시크릿(Model API 대시보드에서 발급한 키)이 있어야
-합니다. `secrets: inherit` 이므로 org 레벨 시크릿이 있으면 그것도 잡힙니다.
+합니다. org 레벨 시크릿이 있으면 그것도 `secrets.META_API_KEY` 로 잡힙니다.
+
+`secrets: inherit` 이 아니라 위처럼 하나만 명시적으로 넘기세요. inherit 은 호출
+레포의 **모든** 시크릿을 중앙 워크플로에 넘깁니다.
 
 ```bash
 gh secret set META_API_KEY --repo k-devcon/<repo>
