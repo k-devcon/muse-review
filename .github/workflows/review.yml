@@ -1,0 +1,191 @@
+name: Muse Code Review (reusable)
+
+# 조직 공통 AI 코드 리뷰어. 각 레포는 이 워크플로를 `uses:` 로 호출하기만 합니다.
+# 호출 예시는 README.md 참고.
+#
+# base 프롬프트가 별도 파일이 아니라 아래 heredoc 에 들어 있는 이유:
+# 이 레포가 비공개라 호출 레포의 GITHUB_TOKEN 으로는 여기 파일을 읽을 수 없습니다.
+# 반면 워크플로 yml 자체는 Actions 가 알아서 가져오므로, 프롬프트를 여기 두면
+# 크로스레포 접근용 PAT 을 org 시크릿으로 만들지 않아도 됩니다.
+# 덤으로 워크플로와 프롬프트가 같은 커밋/태그에 묶여 버전이 어긋날 수 없습니다.
+on:
+  workflow_call:
+    inputs:
+      model:
+        description: Muse Code CLI 에 넘길 모델
+        type: string
+        default: muse-spark-1.3-contributor
+      reasoning-effort:
+        type: string
+        default: medium
+      max-model-steps:
+        type: number
+        default: 30
+      focus-path:
+        description: >-
+          레포별 추가 리뷰 관점 파일 경로. 호출 레포의 기본 브랜치에서 읽어
+          base 프롬프트의 __FOCUS__ 자리에 끼워 넣습니다. 없으면 그냥 건너뜁니다.
+        type: string
+        default: .github/muse-review-focus.md
+      runs-on:
+        type: string
+        default: self-hosted
+      timeout-minutes:
+        type: number
+        default: 20
+    secrets:
+      META_API_KEY:
+        required: true
+
+jobs:
+  review:
+    name: Muse Review
+    # issue_comment 는 이슈에도 발생하므로 PR 코멘트인지 확인하고,
+    # 쓰기 권한이 있는 사람의 `/review` 코멘트만 허용합니다.
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event.issue.pull_request &&
+       startsWith(github.event.comment.body, '/review') &&
+       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
+    runs-on: ${{ inputs.runs-on }}
+    # 모델 단계가 멈췄을 때 self-hosted 러너를 무한 점유하지 않도록 상한을 둡니다.
+    # 실측 리뷰 소요는 5~6분 수준입니다.
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    concurrency:
+      group: muse-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Resolve PR context
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          head_sha=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq .headRefOid)
+          echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ steps.pr.outputs.number }}/head
+          fetch-depth: 0
+
+      - name: Install Muse Code CLI
+        run: |
+          set -euo pipefail
+          if ! command -v muse >/dev/null 2>&1; then
+            curl -fsSL https://dev.meta.ai/install.sh | bash
+            # 설치 위치(~/.local/bin)가 PATH 에 없을 수 있으므로 이후 스텝을 위해 등록
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.local/bin:$PATH"
+          fi
+          muse --version
+
+      - name: Render review prompt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          FOCUS_PATH: ${{ inputs.focus-path }}
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/muse"
+          mkdir -p "$work"
+
+          # ── base 프롬프트 (모든 레포 공통) ─────────────────────────────
+          # 수정 시 README.md 의 "base 프롬프트 고치기" 절을 먼저 읽으세요.
+          cat > "$work/base.md" <<'MUSE_BASE_EOF'
+          REPO: __REPO__
+          PR NUMBER: __PR_NUMBER__
+
+          이 Pull Request의 변경 사항을 코드 리뷰해 주세요. 리뷰는 한국어로 작성합니다.
+
+          **이 PR의 변경된 파일(diff)만** 리뷰 대상입니다. 변경과 무관한 코드베이스
+          탐색은 최소화하고, 간결하게 진행하세요.
+
+          먼저 `gh pr diff __PR_NUMBER__`로 변경된 코드를 확인한 뒤, 아래 관점으로 검토하세요:
+          - 버그 및 로직 오류, 엣지 케이스 누락
+          - 보안 취약점 (입력 검증, 인증/인가, 시크릿 노출 등)
+          - 코드 품질 / 가독성 / 유지보수성, 프로젝트 컨벤션 준수
+          - 성능 및 리소스 관리 이슈
+          - 테스트 커버리지
+          __FOCUS__
+          리뷰 방식:
+          - **반드시** 마지막에 `gh pr comment __PR_NUMBER__ --body "..."` 를 실행해 총평
+            코멘트를 1개 남기세요. 이것은 필수이며, 코멘트를 남기지 않고 종료하면 안 됩니다.
+            리뷰 내용을 응답 텍스트로만 쓰고 끝내지 마세요.
+          - 총평 코멘트의 **맨 첫 줄**에는 이번 리뷰의 전체 심각도/중요도를 나타내는
+            배지를 반드시 넣으세요. 발견된 이슈 중 **가장 높은 심각도**를 기준으로
+            아래 4개 중 하나를 그대로 복사해 사용합니다(어떤 것이 필수 수정인지 한눈에
+            보이도록 하는 것이 목적입니다):
+            - 머지 전 반드시 고쳐야 하는 버그/보안/장애 위험:
+              `![review](https://img.shields.io/badge/review-MUST_FIX-critical) 🔴 **필수 수정 — 머지 전 반드시 수정이 필요합니다.**`
+            - 고치는 것이 좋으나 머지를 막지는 않는 문제:
+              `![review](https://img.shields.io/badge/review-SHOULD_FIX-orange) 🟠 **권장 수정 — 수정을 권장합니다.**`
+            - 사소한 개선/취향 수준의 제안:
+              `![review](https://img.shields.io/badge/review-NITPICK-yellow) 🟡 **개선 제안 — 가벼운 제안 사항입니다.**`
+            - 특이사항 없음:
+              `![review](https://img.shields.io/badge/review-LGTM-brightgreen) 🟢 **특이사항 없음.**`
+            배지 다음 줄부터 심각도별로 이슈를 그룹핑해 요약하세요.
+          - 지적할 문제가 전혀 없더라도 위 🟢 LGTM 배지와 함께 간단한 승인 코멘트를
+            반드시 남기세요.
+          - 특정 코드 라인에 대한 지적은 아래 명령 형태로 인라인 코멘트를 남기되, 각 코멘트
+            맨 앞에 심각도 이모지(🔴 필수 / 🟠 권장 / 🟡 제안)를 붙여 어떤 것이 필수 수정인지
+            바로 구분되게 하세요:
+            `gh api repos/__REPO__/pulls/__PR_NUMBER__/comments -f body="..." -f commit_id="__HEAD_SHA__" -f path="<파일경로>" -F line=<줄번호> -f side=RIGHT`
+          - 실제로 문제가 되는 부분만 지적하고, 사소한 취향 문제는 최소화하세요.
+          MUSE_BASE_EOF
+          # ── base 프롬프트 끝 ───────────────────────────────────────────
+
+          # focus 파일은 호출 레포의 **기본 브랜치**에서만 가져옵니다.
+          # 체크아웃은 PR head 이므로, PR 에서 focus 를 고쳐 리뷰어 동작을
+          # 바꾸는 것을 막기 위함입니다. (도입 PR 에서는 아직 없으니 그냥 건너뜁니다.)
+          focus="$work/focus.md"
+          merged="$work/merged.md"
+          if gh api "repos/$REPO/contents/$FOCUS_PATH?ref=$DEFAULT_BRANCH" \
+               -H "Accept: application/vnd.github.raw" > "$focus" 2>/dev/null && [ -s "$focus" ]; then
+            echo "focus: $DEFAULT_BRANCH:$FOCUS_PATH ($(wc -l < "$focus") 줄)"
+            awk -v f="$focus" '/^__FOCUS__$/ { while ((getline line < f) > 0) print line; next } { print }' \
+              "$work/base.md" > "$merged"
+          else
+            echo "::notice::$DEFAULT_BRANCH 에 $FOCUS_PATH 가 없어 base 프롬프트만 사용합니다."
+            # 마커를 지우지 않고 빈 줄로 남긴다. 앞 목록과 "리뷰 방식:" 사이를
+            # 띄우는 역할도 겸하는 자리라, 통째로 없애면 두 블록이 붙어버린다.
+            sed 's/^__FOCUS__$//' "$work/base.md" > "$merged"
+          fi
+
+          sed -e "s|__REPO__|$REPO|g" \
+              -e "s|__PR_NUMBER__|$PR_NUMBER|g" \
+              -e "s|__HEAD_SHA__|$HEAD_SHA|g" \
+              "$merged" > "$work/prompt.md"
+          [ -s "$work/prompt.md" ] || { echo "::error::렌더링된 프롬프트가 비어 있습니다."; exit 1; }
+          grep -q '__[A-Z_]\{3,\}__' "$work/prompt.md" \
+            && { echo "::error::치환되지 않은 플레이스홀더가 남아 있습니다."; exit 1; } || true
+
+      - name: Muse Code Review
+        env:
+          # 시크릿에는 Model API 대시보드에서 발급한 API 키가 들어 있습니다.
+          # META_API_KEY: Muse Code CLI 가 읽는 변수. 저장된 로그인 세션보다 우선합니다.
+          # MODEL_API_KEY: Model API / 공식 SDK 가 읽는 변수. 같은 키를 사용합니다.
+          META_API_KEY: ${{ secrets.META_API_KEY }}
+          MODEL_API_KEY: ${{ secrets.META_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          muse exec \
+            --provider meta \
+            --model "${{ inputs.model }}" \
+            --reasoning-effort "${{ inputs.reasoning-effort }}" \
+            --approval-mode never \
+            --sandbox-network enabled \
+            --max-model-steps "${{ inputs.max-model-steps }}" \
+            --prompt-file "$RUNNER_TEMP/muse/prompt.md"
