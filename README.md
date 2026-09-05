@@ -80,9 +80,14 @@ RUNNER_TEMP=/tmp/x GITHUB_WORKSPACE=/tmp/ws REPO=k-devcon/foo DEFAULT_BRANCH=mai
 cat /tmp/x/muse/prompt.md
 ```
 
-`base.md` 는 워크플로와 **같은 ref** 에서 읽습니다(`github.workflow_ref` 파싱).
-호출부가 `@v1` 이면 `v1` 시점의 프롬프트를 쓰므로, main 에 머지해도 태그를
-옮기기 전까지는 반영되지 않습니다.
+`base.md` 는 **이 워크플로 파일과 같은 커밋**에서 읽습니다
+(`github.job_workflow_sha`). 호출부가 `@v1` 이면 `v1` 시점의 프롬프트를 쓰므로,
+main 에 머지해도 태그를 옮기기 전까지는 반영되지 않습니다.
+
+> `github.workflow_ref` 를 쓰면 안 됩니다. reusable workflow 안에서도 `github.*`
+> 컨텍스트는 **호출한 쪽**을 가리켜서, 이 레포가 아니라 호출 레포를 체크아웃합니다.
+> 체크아웃 스텝은 멀쩡히 성공하고 그 다음에 "base.md 없음" 으로 죽습니다.
+> `job_workflow_sha` 만이 지금 실행 중인 reusable workflow 파일의 커밋입니다.
 
 ## 입력값
 

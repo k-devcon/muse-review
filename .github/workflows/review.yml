@@ -78,26 +78,33 @@ jobs:
           ref: refs/pull/${{ steps.pr.outputs.number }}/head
           fetch-depth: 0
 
-      # base 프롬프트는 이 워크플로와 **같은 ref** 에서 가져옵니다.
-      # 호출부가 `@v1` 로 핀을 고정하면 워크플로와 프롬프트가 항상 함께 움직입니다.
-      - name: Resolve reusable workflow ref
+      # base 프롬프트는 **이 워크플로 파일과 같은 커밋**에서 가져옵니다.
+      # 호출부가 `@v1` 이면 v1 시점의 프롬프트를 쓰므로 둘이 어긋날 수 없습니다.
+      #
+      # github.workflow_ref 를 쓰면 안 됩니다. reusable workflow 안에서도 github.*
+      # 컨텍스트는 **호출한 쪽**을 가리켜서, muse-review 가 아니라 호출 레포를
+      # 체크아웃합니다(스텝은 성공하고 다음 cp 에서 죽습니다).
+      # job_workflow_sha 만이 "지금 실행 중인 reusable workflow 파일의 커밋"입니다.
+      - name: Resolve base prompt commit
         id: base
         env:
-          WORKFLOW_REF: ${{ github.workflow_ref }}
+          JOB_WORKFLOW_SHA: ${{ github.job_workflow_sha }}
         run: |
           set -euo pipefail
-          # 예) k-devcon/muse-review/.github/workflows/review.yml@refs/tags/v1
-          echo "repository=${WORKFLOW_REF%%/.github/*}" >> "$GITHUB_OUTPUT"
-          echo "ref=${WORKFLOW_REF##*@}" >> "$GITHUB_OUTPUT"
-          echo "base prompt source: ${WORKFLOW_REF%%/.github/*}@${WORKFLOW_REF##*@}"
+          if [ -z "$JOB_WORKFLOW_SHA" ]; then
+            echo "::error::job_workflow_sha 가 비어 있습니다. 이 워크플로는 reusable(workflow_call) 로만 쓸 수 있습니다."
+            exit 1
+          fi
+          echo "sha=$JOB_WORKFLOW_SHA" >> "$GITHUB_OUTPUT"
+          echo "base prompt source: k-devcon/muse-review@$JOB_WORKFLOW_SHA"
 
       # PR 체크아웃(워크스페이스 루트) **뒤에** 받아야 합니다.
       # 루트 체크아웃은 clean 시 워크스페이스를 비우므로 순서가 바뀌면 지워집니다.
       - name: Checkout base prompt
         uses: actions/checkout@v4
         with:
-          repository: ${{ steps.base.outputs.repository }}
-          ref: ${{ steps.base.outputs.ref }}
+          repository: k-devcon/muse-review
+          ref: ${{ steps.base.outputs.sha }}
           path: .muse-base
           fetch-depth: 1
 
@@ -129,9 +136,14 @@ jobs:
           # 워크스페이스를 깨끗이 두려고 RUNNER_TEMP 로 옮기고 체크아웃본은 지웁니다
           # (리뷰 대상 diff 에 .muse-base 가 섞여 보이지 않도록).
           base="$work/base.md"
-          cp "$GITHUB_WORKSPACE/.muse-base/prompt/base.md" "$base"
+          src="$GITHUB_WORKSPACE/.muse-base/prompt/base.md"
+          if [ ! -s "$src" ]; then
+            echo "::error::base 프롬프트를 찾을 수 없습니다: $src"
+            echo "체크아웃된 내용:"; ls -a "$GITHUB_WORKSPACE/.muse-base" 2>&1 | head -20
+            exit 1
+          fi
+          cp "$src" "$base"
           rm -rf "$GITHUB_WORKSPACE/.muse-base"
-          [ -s "$base" ] || { echo "::error::base 프롬프트가 비어 있습니다."; exit 1; }
 
           # focus 파일은 호출 레포의 **기본 브랜치**에서만 가져옵니다.
           # 체크아웃은 PR head 이므로, PR 에서 focus 를 고쳐 리뷰어 동작을
