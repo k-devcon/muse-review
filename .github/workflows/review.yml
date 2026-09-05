@@ -78,6 +78,29 @@ jobs:
           ref: refs/pull/${{ steps.pr.outputs.number }}/head
           fetch-depth: 0
 
+      # base 프롬프트는 이 워크플로와 **같은 ref** 에서 가져옵니다.
+      # 호출부가 `@v1` 로 핀을 고정하면 워크플로와 프롬프트가 항상 함께 움직입니다.
+      - name: Resolve reusable workflow ref
+        id: base
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          set -euo pipefail
+          # 예) k-devcon/muse-review/.github/workflows/review.yml@refs/tags/v1
+          echo "repository=${WORKFLOW_REF%%/.github/*}" >> "$GITHUB_OUTPUT"
+          echo "ref=${WORKFLOW_REF##*@}" >> "$GITHUB_OUTPUT"
+          echo "base prompt source: ${WORKFLOW_REF%%/.github/*}@${WORKFLOW_REF##*@}"
+
+      # PR 체크아웃(워크스페이스 루트) **뒤에** 받아야 합니다.
+      # 루트 체크아웃은 clean 시 워크스페이스를 비우므로 순서가 바뀌면 지워집니다.
+      - name: Checkout base prompt
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.base.outputs.repository }}
+          ref: ${{ steps.base.outputs.ref }}
+          path: .muse-base
+          fetch-depth: 1
+
       - name: Install Muse Code CLI
         run: |
           set -euo pipefail
@@ -102,50 +125,13 @@ jobs:
           work="$RUNNER_TEMP/muse"
           mkdir -p "$work"
 
-          # ── base 프롬프트 (모든 레포 공통) ─────────────────────────────
-          # 수정 시 README.md 의 "base 프롬프트 고치기" 절을 먼저 읽으세요.
-          cat > "$work/base.md" <<'MUSE_BASE_EOF'
-          REPO: __REPO__
-          PR NUMBER: __PR_NUMBER__
-
-          이 Pull Request의 변경 사항을 코드 리뷰해 주세요. 리뷰는 한국어로 작성합니다.
-
-          **이 PR의 변경된 파일(diff)만** 리뷰 대상입니다. 변경과 무관한 코드베이스
-          탐색은 최소화하고, 간결하게 진행하세요.
-
-          먼저 `gh pr diff __PR_NUMBER__`로 변경된 코드를 확인한 뒤, 아래 관점으로 검토하세요:
-          - 버그 및 로직 오류, 엣지 케이스 누락
-          - 보안 취약점 (입력 검증, 인증/인가, 시크릿 노출 등)
-          - 코드 품질 / 가독성 / 유지보수성, 프로젝트 컨벤션 준수
-          - 성능 및 리소스 관리 이슈
-          - 테스트 커버리지
-          __FOCUS__
-          리뷰 방식:
-          - **반드시** 마지막에 `gh pr comment __PR_NUMBER__ --body "..."` 를 실행해 총평
-            코멘트를 1개 남기세요. 이것은 필수이며, 코멘트를 남기지 않고 종료하면 안 됩니다.
-            리뷰 내용을 응답 텍스트로만 쓰고 끝내지 마세요.
-          - 총평 코멘트의 **맨 첫 줄**에는 이번 리뷰의 전체 심각도/중요도를 나타내는
-            배지를 반드시 넣으세요. 발견된 이슈 중 **가장 높은 심각도**를 기준으로
-            아래 4개 중 하나를 그대로 복사해 사용합니다(어떤 것이 필수 수정인지 한눈에
-            보이도록 하는 것이 목적입니다):
-            - 머지 전 반드시 고쳐야 하는 버그/보안/장애 위험:
-              `![review](https://img.shields.io/badge/review-MUST_FIX-critical) 🔴 **필수 수정 — 머지 전 반드시 수정이 필요합니다.**`
-            - 고치는 것이 좋으나 머지를 막지는 않는 문제:
-              `![review](https://img.shields.io/badge/review-SHOULD_FIX-orange) 🟠 **권장 수정 — 수정을 권장합니다.**`
-            - 사소한 개선/취향 수준의 제안:
-              `![review](https://img.shields.io/badge/review-NITPICK-yellow) 🟡 **개선 제안 — 가벼운 제안 사항입니다.**`
-            - 특이사항 없음:
-              `![review](https://img.shields.io/badge/review-LGTM-brightgreen) 🟢 **특이사항 없음.**`
-            배지 다음 줄부터 심각도별로 이슈를 그룹핑해 요약하세요.
-          - 지적할 문제가 전혀 없더라도 위 🟢 LGTM 배지와 함께 간단한 승인 코멘트를
-            반드시 남기세요.
-          - 특정 코드 라인에 대한 지적은 아래 명령 형태로 인라인 코멘트를 남기되, 각 코멘트
-            맨 앞에 심각도 이모지(🔴 필수 / 🟠 권장 / 🟡 제안)를 붙여 어떤 것이 필수 수정인지
-            바로 구분되게 하세요:
-            `gh api repos/__REPO__/pulls/__PR_NUMBER__/comments -f body="..." -f commit_id="__HEAD_SHA__" -f path="<파일경로>" -F line=<줄번호> -f side=RIGHT`
-          - 실제로 문제가 되는 부분만 지적하고, 사소한 취향 문제는 최소화하세요.
-          MUSE_BASE_EOF
-          # ── base 프롬프트 끝 ───────────────────────────────────────────
+          # base 프롬프트는 위에서 체크아웃한 prompt/base.md 를 씁니다.
+          # 워크스페이스를 깨끗이 두려고 RUNNER_TEMP 로 옮기고 체크아웃본은 지웁니다
+          # (리뷰 대상 diff 에 .muse-base 가 섞여 보이지 않도록).
+          base="$work/base.md"
+          cp "$GITHUB_WORKSPACE/.muse-base/prompt/base.md" "$base"
+          rm -rf "$GITHUB_WORKSPACE/.muse-base"
+          [ -s "$base" ] || { echo "::error::base 프롬프트가 비어 있습니다."; exit 1; }
 
           # focus 파일은 호출 레포의 **기본 브랜치**에서만 가져옵니다.
           # 체크아웃은 PR head 이므로, PR 에서 focus 를 고쳐 리뷰어 동작을

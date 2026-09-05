@@ -44,17 +44,6 @@ gh secret set META_API_KEY --repo k-devcon/<repo>
 
 이게 전부입니다. 대부분의 레포는 프롬프트를 따로 두지 않아도 됩니다.
 
-> **이 레포는 비공개입니다.** 그래서 다른 레포가 호출하려면 여기 Actions 접근
-> 설정이 조직에 열려 있어야 합니다. 한 번만 해두면 됩니다.
->
-> ```bash
-> gh api -X PUT repos/k-devcon/muse-review/actions/permissions/access \
->   -f access_level=organization
-> ```
->
-> 안 열려 있으면 호출 레포에서 워크플로가 시작조차 못 하고
-> `workflow was not found` 류로 실패합니다.
-
 ## 레포별 리뷰 관점 추가 (선택)
 
 범용 관점(버그/보안/품질/성능/테스트)만으로 부족한 레포 — 예를 들어 인프라
@@ -71,21 +60,13 @@ gh secret set META_API_KEY --repo k-devcon/<repo>
 
 ## base 프롬프트 고치기
 
-base 프롬프트는 별도 `.md` 파일이 아니라 `.github/workflows/review.yml` 의
-`Render review prompt` 스텝 안 heredoc(`MUSE_BASE_EOF`)에 들어 있습니다.
+`prompt/base.md` 를 고치면 됩니다. 그냥 마크다운 파일입니다.
 
-이 레포가 비공개라서 그렇습니다. 호출 레포의 `GITHUB_TOKEN` 은 자기 레포에만
-유효해서 여기 있는 파일을 크로스레포로 읽지 못합니다. 프롬프트를 별도 파일로
-두려면 조직 시크릿에 PAT 을 하나 더 만들어 돌려야 하는데, 워크플로 yml 자체는
-Actions 가 알아서 가져오므로 프롬프트를 그 안에 넣으면 토큰이 아예 필요
-없습니다. 덤으로 워크플로와 프롬프트가 같은 커밋에 묶여 버전이 어긋날 수 없고요.
+주의할 점은 두 가지뿐입니다:
 
-고칠 때 주의할 점:
-
-- heredoc 본문은 YAML 블록 스칼라 안이라 **들여쓰기가 10칸 기준**입니다.
-  프롬프트에서 컬럼 0 이어야 하는 줄은 10칸, 4칸 들여써야 하는 줄은 14칸입니다.
-- `__FOCUS__` 는 **단독 줄**이어야 합니다. focus 파일이 없으면 빈 줄로 치환되는데,
-  앞 목록과 `리뷰 방식:` 사이를 띄우는 역할도 겸합니다. 지우지 마세요.
+- `__FOCUS__` 는 **단독 줄**로 남겨두세요. focus 파일이 있으면 그 자리에 끼워
+  넣고, 없으면 빈 줄로 치환됩니다. 앞 목록과 `리뷰 방식:` 사이를 띄우는 역할도
+  겸하므로 지우면 두 블록이 붙어버립니다.
 - `__REPO__` / `__PR_NUMBER__` / `__HEAD_SHA__` 는 렌더 단계에서 치환됩니다.
   치환 안 된 `__대문자__` 가 남아 있으면 스텝이 실패합니다.
 
@@ -93,10 +74,15 @@ Actions 가 알아서 가져오므로 프롬프트를 그 안에 넣으면 토�
 
 ```bash
 ruby -ryaml -e 'y=YAML.load_file(".github/workflows/review.yml"); print y["jobs"]["review"]["steps"].find{|s|s["name"]=="Render review prompt"}["run"]' > /tmp/render.sh
-RUNNER_TEMP=/tmp/x REPO=k-devcon/foo DEFAULT_BRANCH=main PR_NUMBER=1 HEAD_SHA=abc \
-  FOCUS_PATH=.github/muse-review-focus.md bash /tmp/render.sh
+mkdir -p /tmp/ws/.muse-base/prompt && cp prompt/base.md /tmp/ws/.muse-base/prompt/
+RUNNER_TEMP=/tmp/x GITHUB_WORKSPACE=/tmp/ws REPO=k-devcon/foo DEFAULT_BRANCH=main \
+  PR_NUMBER=1 HEAD_SHA=abc FOCUS_PATH=.github/muse-review-focus.md bash /tmp/render.sh
 cat /tmp/x/muse/prompt.md
 ```
+
+`base.md` 는 워크플로와 **같은 ref** 에서 읽습니다(`github.workflow_ref` 파싱).
+호출부가 `@v1` 이면 `v1` 시점의 프롬프트를 쓰므로, main 에 머지해도 태그를
+옮기기 전까지는 반영되지 않습니다.
 
 ## 입력값
 
