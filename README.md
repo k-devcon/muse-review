@@ -80,14 +80,26 @@ RUNNER_TEMP=/tmp/x GITHUB_WORKSPACE=/tmp/ws REPO=k-devcon/foo DEFAULT_BRANCH=mai
 cat /tmp/x/muse/prompt.md
 ```
 
-`base.md` 는 **이 워크플로 파일과 같은 커밋**에서 읽습니다
-(`github.job_workflow_sha`). 호출부가 `@v1` 이면 `v1` 시점의 프롬프트를 쓰므로,
-main 에 머지해도 태그를 옮기기 전까지는 반영되지 않습니다.
+`base.md` 는 워크플로와 **같은 릴리스 태그**에서 읽습니다(`base-ref` 입력,
+기본값 `v1`). main 에 머지해도 `v1` 태그를 옮기기 전까지는 반영되지 않습니다.
 
-> `github.workflow_ref` 를 쓰면 안 됩니다. reusable workflow 안에서도 `github.*`
-> 컨텍스트는 **호출한 쪽**을 가리켜서, 이 레포가 아니라 호출 레포를 체크아웃합니다.
-> 체크아웃 스텝은 멀쩡히 성공하고 그 다음에 "base.md 없음" 으로 죽습니다.
-> `job_workflow_sha` 만이 지금 실행 중인 reusable workflow 파일의 커밋입니다.
+`v1` 브랜치에서 프롬프트 변경을 미리 시험하려면 호출부에서 넘기세요:
+
+```yaml
+    with:
+      base-ref: my-prompt-branch
+```
+
+> **왜 자동으로 못 알아내나.** 실행 중인 reusable workflow 의 ref 를 컨텍스트에서
+> 얻을 방법이 없습니다. 두 가지를 시도했고 둘 다 실패했습니다:
+>
+> - `github.workflow_ref` — reusable workflow 안에서도 `github.*` 컨텍스트는
+>   **호출한 쪽**을 가리킵니다. 이 레포가 아니라 호출 레포를 체크아웃하므로
+>   체크아웃 스텝은 성공하고 그 다음에 "base.md 없음" 으로 죽습니다.
+> - `github.job_workflow_sha` — 이 런너의 컨텍스트에 **존재하지 않습니다**(빈 값).
+>
+> 그래서 태그를 명시적으로 고정합니다. `v2` 를 낼 때는 그 파일의 `base-ref`
+> 기본값도 `v2` 로 바꿔야 합니다.
 
 ## 입력값
 
@@ -99,6 +111,7 @@ main 에 머지해도 태그를 옮기기 전까지는 반영되지 않습니다
 | `reasoning-effort` | `medium` | |
 | `max-model-steps` | `30` | |
 | `focus-path` | `.github/muse-review-focus.md` | 레포별 관점 파일 |
+| `base-ref` | `v1` | base 프롬프트를 가져올 ref. 보통 건드리지 않음 |
 | `runs-on` | `self-hosted` | |
 | `timeout-minutes` | `20` | 실측 리뷰 소요는 5~6분 수준 |
 
